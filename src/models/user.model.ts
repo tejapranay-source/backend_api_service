@@ -1,5 +1,6 @@
 import { Model, ModelOptions, QueryContext, RelationMappings, RelationMappingsThunk } from "objection";
 import bcrypt from "bcrypt";
+import path from "path";
 
 export interface IActivityLog {
   operation: string;
@@ -14,8 +15,8 @@ export class User extends Model {
   email!: string;
   password!: string;
   activity_log?: IActivityLog[];
-  created_at!: string;
-  updated_at!: string;
+  created_at?: string;
+  updated_at?: string;
 
   static tableName = "users";
 
@@ -29,7 +30,7 @@ export class User extends Model {
   async $beforeInsert(queryContext: QueryContext): Promise<void> {
     await super.$beforeInsert(queryContext);
     
-    // Set audit timestamps
+    // Auto-assign timestamps on creation
     const now = new Date().toISOString();
     this.created_at = now;
     this.updated_at = now;
@@ -43,7 +44,7 @@ export class User extends Model {
   async $beforeUpdate(opt: ModelOptions, queryContext: QueryContext): Promise<void> {
     await super.$beforeUpdate(opt, queryContext);
 
-    // Refresh update timestamp
+    // Auto-refresh update timestamp
     this.updated_at = new Date().toISOString();
 
     // Re-hash password if updated as cleartext
@@ -72,13 +73,11 @@ export class User extends Model {
   // --- Relations ---
 
   static get relationMappings(): RelationMappings | RelationMappingsThunk {
-    // Deferred import to avoid circular dependency issues
-    const { Task } = require("./task.model");
-
+    // String-path reference prevents MODULE_NOT_FOUND and breaks circular dependency cycles
     return {
       tasks: {
         relation: Model.HasManyRelation,
-        modelClass: Task,
+        modelClass: path.join(__dirname, "task.model"),
         join: {
           from: "users.id",
           to: "tasks.user_id",
@@ -103,6 +102,8 @@ export class User extends Model {
           maxLength: 255 
         },
         password: { type: "string", minLength: 8, maxLength: 255 },
+        created_at: { type: ["string", "null"] },
+        updated_at: { type: ["string", "null"] },
         activity_log: {
           type: "array",
           items: {
@@ -117,8 +118,6 @@ export class User extends Model {
             },
           },
         },
-        created_at: { type: "string", format: "date-time" },
-        updated_at: { type: "string", format: "date-time" },
       },
     };
   }

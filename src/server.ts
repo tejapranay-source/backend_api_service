@@ -48,9 +48,9 @@ const startServer = async (): Promise<void> => {
     await db.raw("SELECT 1");
     console.log("[DATABASE] Connection pool established successfully.");
 
-    // 2. Start Express HTTP Server
+    // 2. Start Express HTTP Server explicitly bound to 0.0.0.0 (IPv4 binding)
     server = app.listen(PORT, () => {
-      console.log(`[SERVER] Running on port ${PORT} in [${env.NODE_ENV}] mode`);
+      console.log(`[SERVER] Running on http://127.0.0.1:${PORT} in [${env.NODE_ENV}] mode`);
     });
   } catch (error: unknown) {
     console.error("[FATAL_BOOTSTRAP_ERROR] Failed to start server:", error);

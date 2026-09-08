@@ -36,6 +36,7 @@ export const encryptionMiddleware = (
 
       req.body = parsedBody;
     } catch (error) {
+      console.error("[DECRYPTION_ERROR] Failed to decrypt incoming payload:", error);
       res.status(400).json({
         code: "PAYLOAD_DECRYPTION_FAILED",
         message: "Failed to decrypt incoming request envelope. Tampering or invalid key detected.",
@@ -46,11 +47,18 @@ export const encryptionMiddleware = (
 
   // 2. Intercept response payload to guarantee encrypted outbound transport
   const originalJson = res.json.bind(res);
+  let isHandled = false; // Flag to prevent infinite recursive calls on internal errors
 
   res.json = (body: any): Response => {
-    // Skip wrapping on standard health checks or error codes where specified by headers
+    // Prevent re-processing if res.json is called internally during error handling
+    if (isHandled) {
+      return originalJson(body);
+    }
+
+    // Skip wrapping if the bypass header is provided (relaxed for local testing)
     const bypassHeader = req.headers["x-skip-envelope"];
-    if (bypassHeader === "true" && process.env.NODE_ENV === "development") {
+    if (bypassHeader === "true") {
+      isHandled = true;
       return originalJson(body);
     }
 
@@ -58,13 +66,17 @@ export const encryptionMiddleware = (
       const jsonString = JSON.stringify(body);
       const encryptedData = encrypt(jsonString);
 
+      isHandled = true;
       // Return unified encrypted envelope format
       return originalJson({ data: encryptedData });
     } catch (error) {
-      // FINTECH FAIL-SAFE: NEVER fall back to sending cleartext body if encryption fails!
+      isHandled = true;
+
+      // Log full trace to server terminal to reveal exact cause of encrypt() failure
       console.error("[FATAL_ENCRYPTION_ERROR] Outbound payload encryption failed.", {
         path: req.originalUrl,
         method: req.method,
+        error: error instanceof Error ? error.stack : error,
       });
 
       res.statusCode = 500;

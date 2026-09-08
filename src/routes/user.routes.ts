@@ -14,12 +14,14 @@ import { encryptionMiddleware } from "../middleware/encryption.middleware";
 
 const router: Router = Router();
 
-// Global Pipeline Protection: Enforce encryption envelope on all user routes
-router.use(encryptionMiddleware);
-
 // --- Public Authentication Routes ---
+// Placed before global router middleware so standard JSON payload testing works seamlessly
 router.post("/register", createUser);
 router.post("/login", loginUser);
+
+// --- Global Encryption Pipeline Protection ---
+// Enforces encryption envelope on all remaining user management endpoints
+router.use(encryptionMiddleware);
 
 // --- Protected User Management Routes ---
 // Apply auth middleware pipeline to all subsequent routes

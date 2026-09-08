@@ -31,6 +31,17 @@ export const createUser = async (
   next: NextFunction
 ): Promise<void> => {
   try {
+    const { email, password, name } = req.body || {};
+
+    // Explicit payload validation guard
+    if (!email || !password || !name) {
+      res.status(400).json({
+        code: "INVALID_REGISTRATION_PAYLOAD",
+        message: "Name, email, and password are required fields.",
+      });
+      return;
+    }
+
     const idempotencyKey = req.header("Idempotency-Key");
     const user = await createUserService(req.body, idempotencyKey);
 
@@ -39,6 +50,7 @@ export const createUser = async (
       data: user,
     });
   } catch (error) {
+    console.error("[CONTROLLER_CREATE_USER_ERROR]", error);
     next(error);
   }
 };
@@ -50,7 +62,7 @@ export const loginUser = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
     if (!email || !password) {
       res.status(400).json({
@@ -76,6 +88,7 @@ export const loginUser = async (
       data: authResult,
     });
   } catch (error) {
+    console.error("[CONTROLLER_LOGIN_USER_ERROR]", error);
     next(error);
   }
 };

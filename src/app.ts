@@ -5,6 +5,8 @@ import rateLimit from "express-rate-limit";
 import userRoutes from "./routes/user.routes";
 import taskRoutes from "./routes/task.routes";
 import { env } from "./config/env.config";
+// Import encryptionMiddleware here if you want it globally active:
+// import { encryptionMiddleware } from "./middleware/encryptionMiddleware";
 
 const app: Express = express();
 
@@ -14,7 +16,14 @@ app.use(
   cors({
     origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : "*",
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Skip-Envelope"],
+    allowedHeaders: [
+      "Content-Type", 
+      "Authorization", 
+      "Idempotency-Key", 
+      "X-Skip-Envelope", 
+      "x-skip-envelope",
+      "x-encrypt"
+    ],
   })
 );
 
@@ -35,7 +44,32 @@ app.use(globalLimiter);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// 3. Healthcheck Endpoint
+// 3. REAL-TIME TERMINAL LOGGER (Fixes silent execution)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const startTime = Date.now();
+  
+  // Log request onset
+  console.log(`\n--------------------------------------------------`);
+  console.log(`[INCOMING REQUEST] ${req.method} ${req.originalUrl}`);
+  console.log(`[HEADERS] x-skip-envelope: ${req.headers["x-skip-envelope"] || "false"}`);
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log(`[BODY]`, JSON.stringify(req.body, null, 2));
+  }
+
+  // Intercept response finish to log status code and time taken
+  res.on("finish", () => {
+    const duration = Date.now() - startTime;
+    console.log(`[RESPONSE SENT] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} (${duration}ms)`);
+    console.log(`--------------------------------------------------\n`);
+  });
+
+  next();
+});
+
+// Optional: Mount encryption middleware globally if required across all /api endpoints
+// app.use(encryptionMiddleware);
+
+// 4. Healthcheck Endpoint
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
     status: "UP",
@@ -44,11 +78,11 @@ app.get("/health", (_req: Request, res: Response) => {
   });
 });
 
-// 4. Domain Route Mounting
+// 5. Domain Route Mounting
 app.use("/api/users", userRoutes);
 app.use("/api/tasks", taskRoutes);
 
-// 5. Unmapped Route Catch-All (404)
+// 6. Unmapped Route Catch-All (404)
 app.use((_req: Request, res: Response) => {
   res.status(404).json({
     code: "NOT_FOUND",
@@ -56,7 +90,7 @@ app.use((_req: Request, res: Response) => {
   });
 });
 
-// 6. Enterprise Centralized Global Error Handler
+// 7. Enterprise Centralized Global Error Handler
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error("[UNHANDLED_EXCEPTION]", {
     name: err.name,
