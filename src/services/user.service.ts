@@ -1,22 +1,36 @@
-import jwt from "jsonwebtoken";
+import jwt, { SignOptions } from "jsonwebtoken";
 import { OrderByDirection, OrderByNulls } from "objection";
 import { User, IActivityLog } from "../models/user.model";
+import { env } from "../config/env.config";
 
 export interface ICreateUserDTO {
   name: string;
   email: string;
   password: string;
   activity_log?: IActivityLog[];
-  [key: string]: any;
 }
 
 export interface IUpdateUserDTO {
-  name: string;
-  email: string;
+  name?: string;
+  email?: string;
+}
+
+export interface ILoginDTO {
+  email?: string;
+  password?: string;
+}
+
+export interface IUserQueryParams {
+  q?: string;
+  search?: string;
+  sortBy?: string;
+  order?: string;
+  nulls?: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface ILoginResponse {
-  message: string;
   token: string;
   user: {
     id: number;
@@ -38,63 +52,106 @@ export interface IUserActivityResponse {
   activity: IActivityLog[];
 }
 
-const logUserActivity = async (userId: number, operation: string): Promise<void> => {
-  const user = await User.query().findById(userId);
+// Dummy hash used for constant-time comparison on non-existent emails
+const DUMMY_HASH = "$2b$12$e80yJp9eF21Nf3S/15w6e.7533mG910lYfN6/09X27h33M5Xn29iS";
+
+// Helper method to safely append activity logs inside open transactions
+const appendUserActivityTrx = async (
+  trx: any,
+  userId: number,
+  operation: string,
+  ipAddress?: string,
+  userAgent?: string
+): Promise<void> => {
+  const user = await User.query(trx).findById(userId).forUpdate();
   if (!user) return;
 
   const currentActivity = Array.isArray(user.activity_log) ? user.activity_log : [];
   const newActivity: IActivityLog = {
     operation,
-    performed_at: new Date().toISOString()
+    performed_at: new Date().toISOString(),
+    ...(ipAddress && { ip_address: ipAddress }),
+    ...(userAgent && { user_agent: userAgent }),
   };
 
-  await User.query().patchAndFetchById(userId, {
-    activity_log: [...currentActivity, newActivity]
+  await User.query(trx).patchAndFetchById(userId, {
+    activity_log: [...currentActivity, newActivity],
   });
 };
 
-export const createUserService = async (data: ICreateUserDTO): Promise<User> => {
-  try {
-    const user = await User.query().insert({
-      ...data,
-      activity_log: data.activity_log || [
-        { operation: "CREATE", performed_at: new Date().toISOString() }
-      ]
+/**
+ * Creates a new user record safely inside a database transaction.
+ */
+export const createUserService = async (
+  data: ICreateUserDTO,
+  _idempotencyKey?: string
+): Promise<User> => {
+  return await User.transaction(async (trx) => {
+    const normalizedEmail = data.email.trim().toLowerCase();
+
+    // Check email uniqueness explicitly
+    const existing = await User.query(trx).findOne({ email: normalizedEmail });
+    if (existing) {
+      const error: any = new Error("An account with this email already exists.");
+      error.status = 409;
+      error.code = "EMAIL_ALREADY_EXISTS";
+      throw error;
+    }
+
+    const initialActivity: IActivityLog[] = data.activity_log || [
+      { operation: "ACCOUNT_CREATED", performed_at: new Date().toISOString() },
+    ];
+
+    // Password hashing handled automatically by User model $beforeInsert hook
+    const user = await User.query(trx).insertAndFetch({
+      name: data.name,
+      email: normalizedEmail,
+      password: data.password,
+      activity_log: initialActivity,
     });
 
     return user;
-  } catch (error) {
-    console.error("Error creating user:", error);
-    throw error;
-  }
+  });
 };
 
+/**
+ * Validates credentials and generates access token without side-channel timing leaks.
+ */
 export const loginUserService = async (
   email: string,
-  password: string
+  password: string,
+  ipAddress?: string,
+  userAgent?: string
 ): Promise<ILoginResponse | null> => {
-  try {
-    const user = await User.query().findOne({ email });
+  const normalizedEmail = email.trim().toLowerCase();
 
-    if (!user || user.password !== password) {
-      return null;
-    }
+  const user = await User.query().findOne({ email: normalizedEmail });
 
-    const JWT_SECRET = process.env.JWT_SECRET;
-    if (!JWT_SECRET) {
-      throw new Error("JWT secret is not configured");
-    }
+  if (!user) {
+    // Constant-time execution defense
+    await User.prototype.verifyPassword.call({ password: DUMMY_HASH }, password);
+    return null;
+  }
+
+  const isValidPassword = await user.verifyPassword(password);
+  if (!isValidPassword) {
+    return null;
+  }
+
+  return await User.transaction(async (trx) => {
+    await appendUserActivityTrx(trx, user.id, "USER_LOGIN_SUCCESS", ipAddress, userAgent);
+
+    const jwtOptions: SignOptions = {
+      expiresIn: env.JWT_EXPIRES_IN as SignOptions["expiresIn"],
+    };
 
     const token = jwt.sign(
       { id: user.id, email: user.email },
-      JWT_SECRET,
-      { expiresIn: "1h" }
+      env.JWT_SECRET,
+      jwtOptions
     );
 
-    await logUserActivity(user.id, "LOGIN");
-
     return {
-      message: "Login successful",
       token,
       user: {
         id: user.id,
@@ -102,12 +159,12 @@ export const loginUserService = async (
         email: user.email,
       },
     };
-  } catch (error) {
-    console.error("Error logging in user:", error);
-    throw error;
-  }
+  });
 };
 
+/**
+ * Gets paginated and safely filtered users.
+ */
 export const getUsersService = async (
   search?: string,
   sortBy: string = "id",
@@ -116,131 +173,106 @@ export const getUsersService = async (
   page: number = 1,
   limit: number = 10
 ): Promise<IPaginatedUsers> => {
-  try {
-    let query = User.query().select("id", "name", "email", "activity_log");
+  let query = User.query().select("id", "name", "email", "created_at");
 
-    if (search && search.trim() !== "") {
-      const searchTerm = `%${search.trim()}%`;
-      query = query.where((builder) => {
-        builder.where("name", "ILIKE", searchTerm).orWhere("email", "ILIKE", searchTerm);
-      });
-    }
-
-    const allowedSortFields = ["id", "name", "email"];
-    const requestedFields = sortBy.split(",").map((f) => f.trim());
-    const requestedDirections = order.split(",").map((d) => d.trim().toLowerCase());
-
-    const sortCriteria = requestedFields.map((field, index) => {
-      const validField = allowedSortFields.includes(field) ? field : "id";
-      const validDirection: OrderByDirection = requestedDirections[index] === "desc" ? "desc" : "asc";
-      const validNulls: OrderByNulls = nulls.toLowerCase() === "first" ? "first" : "last";
-
-      return {
-        column: validField,
-        order: validDirection,
-        nulls: validNulls,
-      };
+  if (search && search.trim() !== "") {
+    const searchTerm = `%${search.trim()}%`;
+    query = query.where((builder) => {
+      builder.where("name", "ILIKE", searchTerm).orWhere("email", "ILIKE", searchTerm);
     });
+  }
 
-    query = query.orderBy(sortCriteria);
+  const allowedSortFields = new Set(["id", "name", "email", "created_at"]);
+  const requestedFields = sortBy.split(",").map((f) => f.trim());
+  const requestedDirections = order.split(",").map((d) => d.trim().toLowerCase());
 
-    const validPage = Math.max(1, page);
-    const validLimit = Math.max(1, Math.min(100, limit));
-
-    const paginatedResult = await query.page(validPage - 1, validLimit);
+  const sortCriteria = requestedFields.map((field, index) => {
+    const validField = allowedSortFields.has(field) ? field : "id";
+    const validDirection: OrderByDirection = requestedDirections[index] === "desc" ? "desc" : "asc";
+    const validNulls: OrderByNulls = nulls.toLowerCase() === "first" ? "first" : "last";
 
     return {
-      results: paginatedResult.results,
-      total: paginatedResult.total,
-      page: validPage,
-      limit: validLimit,
-      totalPages: Math.ceil(paginatedResult.total / validLimit),
+      column: validField,
+      order: validDirection,
+      nulls: validNulls,
     };
-  } catch (error) {
-    console.error("Error getting users:", error);
-    throw error;
-  }
+  });
+
+  query = query.orderBy(sortCriteria);
+
+  const validPage = Math.max(1, page);
+  const validLimit = Math.max(1, Math.min(100, limit));
+
+  const paginatedResult = await query.page(validPage - 1, validLimit);
+
+  return {
+    results: paginatedResult.results,
+    total: paginatedResult.total,
+    page: validPage,
+    limit: validLimit,
+    totalPages: Math.ceil(paginatedResult.total / validLimit),
+  };
 };
 
+/**
+ * Retrieves a user record by ID.
+ */
 export const getUserByIdService = async (id: number): Promise<User | null> => {
-  try {
-    const user = await User.query().findById(id).select("id", "name", "email", "activity_log");
-
-    if (!user) {
-      return null;
-    }
-
-    await logUserActivity(user.id, "READ");
-
-    return user;
-  } catch (error) {
-    console.error("Error getting user by ID:", error);
-    throw error;
-  }
+  const user = await User.query().findById(id).select("id", "name", "email", "activity_log", "created_at");
+  return user || null;
 };
 
+/**
+ * Updates user attributes safely using row-level locking.
+ */
 export const updateUserService = async (
   id: number,
   data: IUpdateUserDTO
 ): Promise<User | null> => {
-  try {
-    const user = await User.query().findById(id);
+  return await User.transaction(async (trx) => {
+    const user = await User.query(trx).findById(id).forUpdate();
     if (!user) return null;
 
     const currentActivity = Array.isArray(user.activity_log) ? user.activity_log : [];
-
-    const updatedUser = await User.query().patchAndFetchById(id, {
-      name: data.name,
-      email: data.email,
+    const patchPayload: Record<string, any> = {
+      ...(data.name !== undefined && { name: data.name }),
+      ...(data.email !== undefined && { email: data.email.trim().toLowerCase() }),
       activity_log: [
         ...currentActivity,
-        { operation: "UPDATE", performed_at: new Date().toISOString() }
-      ]
-    });
+        { operation: "ACCOUNT_UPDATED", performed_at: new Date().toISOString() },
+      ],
+    };
 
+    const updatedUser = await User.query(trx).patchAndFetchById(id, patchPayload);
     return updatedUser;
-  } catch (error) {
-    console.error("Error updating user:", error);
-    throw error;
-  }
+  });
 };
 
+/**
+ * Deletes a user record.
+ */
 export const deleteUserService = async (id: number): Promise<User | null> => {
-  try {
-    const user = await User.query().findById(id);
+  return await User.transaction(async (trx) => {
+    const user = await User.query(trx).findById(id).forUpdate();
+    if (!user) return null;
 
-    if (!user) {
-      return null;
-    }
-
-    await User.query().deleteById(id);
-
+    await User.query(trx).deleteById(id);
     return user;
-  } catch (error) {
-    console.error("Error deleting user:", error);
-    throw error;
-  }
+  });
 };
 
+/**
+ * Activity log aggregations.
+ */
 export const getUserActivityService = async (): Promise<IUserActivityResponse[]> => {
-  try {
-    const users = await User.query().select("id", "name", "email", "activity_log");
-    return users.map((u) => ({
-      userId: u.id,
-      activity: u.activity_log || []
-    }));
-  } catch (error) {
-    console.error("Error getting user activity:", error);
-    throw error;
-  }
+  const users = await User.query().select("id", "activity_log");
+  return users.map((u) => ({
+    userId: u.id,
+    activity: u.activity_log || [],
+  }));
 };
 
 export const getUserActivityByIdService = async (id: number): Promise<IActivityLog[]> => {
-  try {
-    const user = await User.query().findById(id).select("id", "activity_log");
-    return user && user.activity_log ? user.activity_log : [];
-  } catch (error) {
-    console.error("Error getting user activity by ID:", error);
-    throw error;
-  }
+  const user = await User.query().findById(id).select("id", "activity_log");
+  return user && user.activity_log ? user.activity_log : [];
 };

@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Request, Response, NextFunction } from "express";
 import {
   createUserService,
   loginUserService,
@@ -8,234 +8,257 @@ import {
   deleteUserService,
   getUserActivityService,
   getUserActivityByIdService,
+  ICreateUserDTO,
+  IUpdateUserDTO,
+  ILoginDTO,
+  IUserQueryParams,
 } from "../services/user.service";
-import { ICreateUserDTO, IUpdateUserDTO } from "../services/user.service";
-
-interface IUserQueryParams {
-  q?: string;
-  search?: string;
-  sortBy?: string;
-  order?: string;
-  nulls?: string;
-  page?: string;
-  limit?: string;
-}
 
 interface IUserParams {
   id: string;
 }
 
-interface ILoginDTO {
-  email?: string;
-  password?: string;
-}
+// Strict numeric parameter sanitizer
+const parsePositiveIntegerId = (idStr: string): number | null => {
+  const parsed = Number(idStr);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
 
+// 1. Create User
 export const createUser = async (
   req: Request<{}, {}, ICreateUserDTO>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
-    const user = await createUserService(req.body);
-    return res.status(201).json(user);
-  } catch (error: any) {
-    console.error("Error creating user:", error);
+    const idempotencyKey = req.header("Idempotency-Key");
+    const user = await createUserService(req.body, idempotencyKey);
 
-    if (error.name === "ValidationError") {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: error.data,
-      });
-    }
-
-    return res.status(500).json({
-      message: "Failed to create user",
+    res.status(201).json({
+      status: "SUCCESS",
+      data: user,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 2. User Login
 export const loginUser = async (
   req: Request<{}, {}, ILoginDTO>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password are required",
+      res.status(400).json({
+        code: "INVALID_CREDENTIALS_PAYLOAD",
+        message: "Email and password are required.",
       });
+      return;
     }
 
-    const result = await loginUserService(email, password);
+    const authResult = await loginUserService(email, password);
 
-    if (!result) {
-      console.log(`Unauthorized login attempt: ${email}`);
-      return res.status(401).json({
-        message: "Unauthorized. Invalid email or password.",
+    if (!authResult) {
+      // Secure response: do not disclose whether email or password was invalid
+      res.status(401).json({
+        code: "UNAUTHORIZED",
+        message: "Invalid credentials provided.",
       });
+      return;
     }
 
-    console.log(`Login successful: ${email}`);
-    return res.status(200).json(result);
-  } catch (error) {
-    console.error("Error logging in user:", error);
-    return res.status(500).json({
-      message: "Failed to login",
+    res.status(200).json({
+      status: "SUCCESS",
+      data: authResult,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 3. Get Paginated & Filtered Users
 export const getUsers = async (
   req: Request<{}, {}, {}, IUserQueryParams>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const search = req.query.q || req.query.search;
     const sortBy = req.query.sortBy || "id";
     const order = req.query.order || "asc";
     const nulls = req.query.nulls || "last";
-    
-    const page = req.query.page ? Number(req.query.page) : 1;
-    const limit = req.query.limit ? Number(req.query.limit) : 10;
+
+    const rawPage = Number(req.query.page);
+    const rawLimit = Number(req.query.limit);
+
+    const page = !isNaN(rawPage) && rawPage > 0 ? rawPage : 1;
+    const limit = !isNaN(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 10;
 
     const data = await getUsersService(search, sortBy, order, nulls, page, limit);
 
-    return res.status(200).json(data);
-  } catch (error) {
-    console.error("Error getting users:", error);
-    return res.status(500).json({
-      message: "Failed to get users",
+    res.status(200).json({
+      status: "SUCCESS",
+      ...data,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 4. Get User By ID
 export const getUserById = async (
   req: Request<IUserParams>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntegerId(req.params.id);
 
-    if (isNaN(id)) {
-      return res.status(400).json({
-        message: "Invalid user ID",
+    if (!id) {
+      res.status(400).json({
+        code: "INVALID_PARAM",
+        message: "User ID must be a positive integer.",
       });
+      return;
     }
 
     const user = await getUserByIdService(id);
 
     if (!user) {
-      return res.status(404).json({
-        message: "User not found",
+      res.status(404).json({
+        code: "NOT_FOUND",
+        message: "User not found.",
       });
+      return;
     }
 
-    return res.status(200).json(user);
-  } catch (error) {
-    console.error("Error getting user by ID:", error);
-    return res.status(500).json({
-      message: "Failed to get user",
+    res.status(200).json({
+      status: "SUCCESS",
+      data: user,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 5. Update User
 export const updateUser = async (
   req: Request<IUserParams, {}, IUpdateUserDTO>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntegerId(req.params.id);
 
-    if (isNaN(id)) {
-      return res.status(400).json({
-        message: "Invalid user ID",
+    if (!id) {
+      res.status(400).json({
+        code: "INVALID_PARAM",
+        message: "User ID must be a positive integer.",
       });
+      return;
     }
 
-    const user = await updateUserService(id, req.body);
+    const updatedUser = await updateUserService(id, req.body);
 
-    if (!user) {
-      return res.status(404).json({
-        message: "User not found",
+    if (!updatedUser) {
+      res.status(404).json({
+        code: "NOT_FOUND",
+        message: "User not found or unavailable for update.",
       });
+      return;
     }
 
-    return res.status(200).json(user);
-  } catch (error) {
-    console.error("Error updating user:", error);
-    return res.status(500).json({
-      message: "Failed to update user",
+    res.status(200).json({
+      status: "SUCCESS",
+      data: updatedUser,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 6. Delete User
 export const deleteUser = async (
   req: Request<IUserParams>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntegerId(req.params.id);
 
-    if (isNaN(id)) {
-      return res.status(400).json({
-        message: "Invalid user ID",
+    if (!id) {
+      res.status(400).json({
+        code: "INVALID_PARAM",
+        message: "User ID must be a positive integer.",
       });
+      return;
     }
 
-    const user = await deleteUserService(id);
+    const deletedUser = await deleteUserService(id);
 
-    if (!user) {
-      return res.status(404).json({
-        message: "User not found",
+    if (!deletedUser) {
+      res.status(404).json({
+        code: "NOT_FOUND",
+        message: "User not found.",
       });
+      return;
     }
 
-    return res.status(200).json({
-      message: "User deleted successfully",
-      user,
+    res.status(200).json({
+      status: "SUCCESS",
+      message: "User deleted successfully.",
+      data: deletedUser,
     });
   } catch (error) {
-    console.error("Error deleting user:", error);
-    return res.status(500).json({
-      message: "Failed to delete user",
-    });
+    next(error);
   }
 };
 
+// 7. Get User Activity
 export const getUserActivity = async (
   _req: Request,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const activity = await getUserActivityService();
-    return res.status(200).json(activity);
-  } catch (error) {
-    console.error("Error getting user activity:", error);
-    return res.status(500).json({
-      message: "Failed to get user activity",
+    res.status(200).json({
+      status: "SUCCESS",
+      data: activity,
     });
+  } catch (error) {
+    next(error);
   }
 };
 
+// 8. Get User Activity By ID
 export const getUserActivityById = async (
   req: Request<IUserParams>,
-  res: Response
-): Promise<Response> => {
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntegerId(req.params.id);
 
-    if (isNaN(id)) {
-      return res.status(400).json({
-        message: "Invalid user ID",
+    if (!id) {
+      res.status(400).json({
+        code: "INVALID_PARAM",
+        message: "User ID must be a positive integer.",
       });
+      return;
     }
 
     const activity = await getUserActivityByIdService(id);
-    return res.status(200).json(activity);
-  } catch (error) {
-    console.error("Error getting user activity by ID:", error);
-    return res.status(500).json({
-      message: "Failed to get user activity by ID",
+
+    res.status(200).json({
+      status: "SUCCESS",
+      data: activity,
     });
+  } catch (error) {
+    next(error);
   }
 };

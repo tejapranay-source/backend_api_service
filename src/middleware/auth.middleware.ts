@@ -1,57 +1,79 @@
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
+import jwt, { TokenExpiredError, JsonWebTokenError } from "jsonwebtoken";
+import { env } from "../config/env.config";
 
-export interface IUserPayload {
+// Re-export interface for standard request extension across controllers/services
+export interface AuthenticatedUser {
   id: number;
   email: string;
+  role?: string;
 }
 
 declare global {
   namespace Express {
     interface Request {
-      user?: IUserPayload;
+      user?: AuthenticatedUser;
     }
   }
 }
 
+/**
+ * Enterprise Authentication Middleware
+ * Enforces stateless Bearer token validation and attaches decoded identity to the request context.
+ */
 export const authenticate = (
   req: Request,
   res: Response,
   next: NextFunction
-): void | Response => {
+): void => {
+  const authHeader = req.headers.authorization;
+
+  // 1. Guard against missing or non-Bearer authorization schemes
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).json({
+      code: "UNAUTHORIZED_MISSING_TOKEN",
+      message: "Access denied. Valid Bearer token required.",
+    });
+    return;
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  // Extra check for empty token payload ("Bearer ")
+  if (!token) {
+    res.status(401).json({
+      code: "UNAUTHORIZED_MALFORMED_HEADER",
+      message: "Access denied. Authorization token is empty.",
+    });
+    return;
+  }
+
   try {
-    const JWT_SECRET = process.env.JWT_SECRET;
+    // 2. Verify token signature against validated application secret
+    const decoded = jwt.verify(token, env.JWT_SECRET) as AuthenticatedUser;
 
-    if (!JWT_SECRET) {
-      return res.status(500).json({
-        message: "JWT secret is not configured",
-      });
-    }
-
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        message: "Unauthorized. Token required.",
-      });
-    }
-
-    const token = authHeader.split(" ")[1];
-
-    const decoded = jwt.verify(token, JWT_SECRET) as IUserPayload;
-
+    // Direct assignment to express Request context
     req.user = decoded;
-
-    console.log(
-      `[AUTH SUCCESS] User '${decoded.email}' (ID: ${decoded.id}) is accessing: ${req.method} ${req.originalUrl}`
-    );
 
     next();
   } catch (error) {
-    console.error("Authentication failed:", error);
+    if (error instanceof TokenExpiredError) {
+      res.status(401).json({
+        code: "TOKEN_EXPIRED",
+        message: "Authentication session expired. Please re-authenticate.",
+      });
+      return;
+    }
 
-    return res.status(401).json({
-      message: "Unauthorized. Invalid or expired token.",
-    });
+    if (error instanceof JsonWebTokenError) {
+      res.status(401).json({
+        code: "INVALID_TOKEN",
+        message: "Authentication failed. Token signature is invalid or corrupted.",
+      });
+      return;
+    }
+
+    // Fail safe for any unhandled JWT exceptions
+    next(error);
   }
 };

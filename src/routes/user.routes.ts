@@ -1,4 +1,4 @@
-import { Router, RequestHandler } from "express";
+import { Router } from "express";
 import {
   createUser,
   loginUser,
@@ -14,21 +14,27 @@ import { encryptionMiddleware } from "../middleware/encryption.middleware";
 
 const router: Router = Router();
 
-// Public routes   === (Encrypted wrapper applied via encryptionMiddleware)
-router.post("/register", encryptionMiddleware, createUser);
-router.post("/login", encryptionMiddleware, loginUser);
+// Global Pipeline Protection: Enforce encryption envelope on all user routes
+router.use(encryptionMiddleware);
 
-// Authenticated routes (Encrypted wrapper applied along with authentication)
-// 1. Static GET routes (must come BEFORE /:id)
-router.get("/", authenticate, encryptionMiddleware, getUsers);
-router.get("/activity", authenticate, encryptionMiddleware, getUserActivity);
+// --- Public Authentication Routes ---
+router.post("/register", createUser);
+router.post("/login", loginUser);
 
-// 2. Specific item GET routes
-router.get("/:id/activity", authenticate, encryptionMiddleware, getUserActivityById as RequestHandler<any>);
-router.get("/:id", authenticate, encryptionMiddleware, getUserById as RequestHandler<any>);
+// --- Protected User Management Routes ---
+// Apply auth middleware pipeline to all subsequent routes
+router.use(authenticate);
 
-// 3. Mutation routes
-router.put("/:id", authenticate, encryptionMiddleware, updateUser as RequestHandler<any>);
-router.delete("/:id", authenticate, encryptionMiddleware, deleteUser as RequestHandler<any>);
+// 1. Static GET routes (Must precede /:id routes)
+router.get("/", getUsers);
+router.get("/activity", getUserActivity);
+
+// 2. Resource-specific GET routes
+router.get("/:id/activity", getUserActivityById);
+router.get("/:id", getUserById);
+
+// 3. Resource Mutation routes
+router.put("/:id", updateUser);
+router.delete("/:id", deleteUser);
 
 export default router;
